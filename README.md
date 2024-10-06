@@ -1,4 +1,5 @@
 # 3d_pipeline
+use for test 
 
 ## 训练
 输入 一系列图像
@@ -6,3 +7,9 @@
 
 ## 运行
 git clone https://github.com/secondxworld/3d_pipeline.git --recursive 
+
+
+
+
+
+code from [dreamgaussian](https://github.com/dreamgaussian/dreamgaussian.git) 
