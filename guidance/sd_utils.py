@@ -46,13 +46,11 @@ class StableDiffusion(nn.Module):
             raise ValueError(
                 f"Stable-diffusion version {self.sd_version} not supported."
             )
-
+        model_key="./models/sd21"
         self.dtype = torch.float16 if fp16 else torch.float32
 
         # Create model
-        pipe = StableDiffusionPipeline.from_pretrained(
-            model_key, torch_dtype=self.dtype
-        )
+        pipe = StableDiffusionPipeline.from_pretrained(model_key) #model_key, torch_dtype=self.dtype
 
         if vram_O:
             pipe.enable_sequential_cpu_offload()
