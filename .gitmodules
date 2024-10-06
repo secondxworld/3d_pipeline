@@ -1,6 +1,0 @@
-[submodule "3d_gaussian/simple-knn"]
-	path = 3d_gaussian/simple-knn
-	url = https://gitlab.inria.fr/bkerbl/simple-knn.git
-[submodule "3d_gaussian/diff-gaussian-rasterization"]
-	path = 3d_gaussian/diff-gaussian-rasterization
-	url = https://github.com/graphdeco-inria/diff-gaussian-rasterization
