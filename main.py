@@ -1,6 +1,5 @@
 import os
 import cv2
-import time
 import tqdm
 import numpy as np
 import dearpygui.dearpygui as dpg
@@ -20,7 +19,6 @@ from gaussian.mesh import safe_normalize
 class Gene3dContent:
     def __init__(self, opt):
         self.opt = opt  # shared with the trainer's opt to support in-place modification of rendering parameters.
-        self.gui = opt.gui  # enable gui
         self.W = opt.W
         self.H = opt.H
         self.cam = OrbitCamera(opt.W, opt.H, r=opt.radius, fovy=opt.fovy)
@@ -28,18 +26,14 @@ class Gene3dContent:
         self.mode = "image"
         self.seed = "random"
 
-        self.buffer_image = np.ones((self.W, self.H, 3), dtype=np.float32)
-        self.need_update = True
-
         # models
         self.device = torch.device("cuda")
         self.bg_remover = None
 
         self.guidance_sd = None
-        self.guidance_zero123 = None
 
         self.enable_sd = False
-        self.enable_zero123 = False
+
 
         # renderer
         self.renderer = Renderer(sh_degree=self.opt.sh_degree)
@@ -80,15 +74,6 @@ class Gene3dContent:
             # initialize gaussians to a blob
             self.renderer.initialize(num_pts=self.opt.num_pts)
 
-        if self.gui:
-            dpg.create_context()
-            self.register_dpg()
-            self.test_step()
-
-    def __del__(self):
-        if self.gui:
-            dpg.destroy_context()
-
     def seed_everything(self):
         try:
             seed = int(self.seed)
@@ -107,7 +92,6 @@ class Gene3dContent:
     def prepare_train(self):
 
         self.step = 0
-
         # setup training
         self.renderer.gaussians.training_setup(self.opt)
         # do not do progressive sh-level
@@ -129,9 +113,9 @@ class Gene3dContent:
             self.cam.near,
             self.cam.far,
         )
+        
 
         self.enable_sd = self.opt.lambda_sd > 0 and self.prompt != ""
-        self.enable_zero123 = self.opt.lambda_zero123 > 0 and self.input_img is not None
 
         # lazy load guidance model
         if self.guidance_sd is None and self.enable_sd:
@@ -154,19 +138,6 @@ class Gene3dContent:
                 self.guidance_sd = StableDiffusion(self.device)
                 print(f"[INFO] loaded SD!")
 
-        if self.guidance_zero123 is None and self.enable_zero123:
-            print(f"[INFO] loading zero123...")
-            from guidance.zero123_utils import Zero123
-
-            if self.opt.stable_zero123:
-                self.guidance_zero123 = Zero123(
-                    self.device, model_key="ashawkey/stable-zero123-diffusers"
-                )
-            else:
-                self.guidance_zero123 = Zero123(
-                    self.device, model_key="ashawkey/zero123-xl-diffusers"
-                )
-            print(f"[INFO] loaded zero123!")
 
         # input image
         if self.input_img is not None:
@@ -198,7 +169,6 @@ class Gene3dContent:
 
         # prepare embeddings
         with torch.no_grad():
-
             if self.enable_sd:
                 if self.opt.imagedream:
                     self.guidance_sd.get_image_text_embeds(
@@ -209,14 +179,7 @@ class Gene3dContent:
                         [self.prompt], [self.negative_prompt]
                     )
 
-            if self.enable_zero123:
-                self.guidance_zero123.get_img_embeds(self.input_img_torch)
-
     def train_step(self):
-        starter = torch.cuda.Event(enable_timing=True)
-        ender = torch.cuda.Event(enable_timing=True)
-        starter.record()
-
         for _ in range(self.train_steps):
 
             self.step += 1
@@ -330,9 +293,6 @@ class Gene3dContent:
             images = torch.cat(images, dim=0)
             poses = torch.from_numpy(np.stack(poses, axis=0)).to(self.device)
 
-            # import kiui
-            # print(hor, ver)
-            # kiui.vis.plot_image(images)
 
             # guidance loss
             if self.enable_sd:
@@ -347,21 +307,7 @@ class Gene3dContent:
                         images,
                         step_ratio=step_ratio if self.opt.anneal_timestep else None,
                     )
-
-            if self.enable_zero123:
-                loss = (
-                    loss
-                    + self.opt.lambda_zero123
-                    * self.guidance_zero123.train_step(
-                        images,
-                        vers,
-                        hors,
-                        radii,
-                        step_ratio=step_ratio if self.opt.anneal_timestep else None,
-                        default_elevation=self.opt.elevation,
-                    )
-                )
-
+                    
             # optimize step
             loss.backward()
             self.optimizer.step()
@@ -396,89 +342,8 @@ class Gene3dContent:
                 if self.step % self.opt.opacity_reset_interval == 0:
                     self.renderer.gaussians.reset_opacity()
 
-        ender.record()
         torch.cuda.synchronize()
-        t = starter.elapsed_time(ender)
 
-        self.need_update = True
-
-        if self.gui:
-            dpg.set_value("_log_train_time", f"{t:.4f}ms")
-            dpg.set_value(
-                "_log_train_log",
-                f"step = {self.step: 5d} (+{self.train_steps: 2d}) loss = {loss.item():.4f}",
-            )
-
-    @torch.no_grad()
-    def test_step(self):
-        # ignore if no need to update
-        if not self.need_update:
-            return
-
-        starter = torch.cuda.Event(enable_timing=True)
-        ender = torch.cuda.Event(enable_timing=True)
-        starter.record()
-
-        # should update image
-        if self.need_update:
-            # render image
-
-            cur_cam = MiniCam(
-                self.cam.pose,
-                self.W,
-                self.H,
-                self.cam.fovy,
-                self.cam.fovx,
-                self.cam.near,
-                self.cam.far,
-            )
-
-            out = self.renderer.render(cur_cam, self.gaussain_scale_factor)
-
-            buffer_image = out[self.mode]  # [3, H, W]
-
-            if self.mode in ["depth", "alpha"]:
-                buffer_image = buffer_image.repeat(3, 1, 1)
-                if self.mode == "depth":
-                    buffer_image = (buffer_image - buffer_image.min()) / (
-                        buffer_image.max() - buffer_image.min() + 1e-20
-                    )
-
-            buffer_image = F.interpolate(
-                buffer_image.unsqueeze(0),
-                size=(self.H, self.W),
-                mode="bilinear",
-                align_corners=False,
-            ).squeeze(0)
-
-            self.buffer_image = (
-                buffer_image.permute(1, 2, 0)
-                .contiguous()
-                .clamp(0, 1)
-                .contiguous()
-                .detach()
-                .cpu()
-                .numpy()
-            )
-
-            # display input_image
-            if self.overlay_input_img and self.input_img is not None:
-                self.buffer_image = (
-                    self.buffer_image * (1 - self.overlay_input_img_ratio)
-                    + self.input_img * self.overlay_input_img_ratio
-                )
-
-            self.need_update = False
-
-        ender.record()
-        torch.cuda.synchronize()
-        t = starter.elapsed_time(ender)
-
-        if self.gui:
-            dpg.set_value("_log_infer_time", f"{t:.4f}ms ({int(1000/t)} FPS)")
-            dpg.set_value(
-                "_texture", self.buffer_image
-            )  # buffer must be contiguous, else seg fault!
 
     def load_input(self, file):
         # load image
@@ -538,7 +403,7 @@ class Gene3dContent:
 
             import nvdiffrast.torch as dr
 
-            if not self.opt.force_cuda_rast and (not self.opt.gui or os.name == "nt"):
+            if not self.opt.force_cuda_rast:
                 glctx = dr.RasterizeGLContext()
             else:
                 glctx = dr.RasterizeCudaContext()
@@ -560,12 +425,6 @@ class Gene3dContent:
                 cur_out = self.renderer.render(cur_cam)
 
                 rgbs = cur_out["image"].unsqueeze(0)  # [1, 3, H, W] in [0, 1]
-
-                # enhance texture quality with zero123 [not working well]
-                # if self.opt.guidance_model == 'zero123':
-                #     rgbs = self.guidance.refine(rgbs, [ver], [hor], [0])
-                # import kiui
-                # kiui.vis.plot_image(rgbs)
 
                 # get coordinate in texture image
                 pose = torch.from_numpy(pose.astype(np.float32)).to(self.device)
@@ -669,349 +528,6 @@ class Gene3dContent:
 
         print(f"[INFO] save model to {path}.")
 
-    def register_dpg(self):
-        ### register texture
-
-        with dpg.texture_registry(show=False):
-            dpg.add_raw_texture(
-                self.W,
-                self.H,
-                self.buffer_image,
-                format=dpg.mvFormat_Float_rgb,
-                tag="_texture",
-            )
-
-        ### register window
-
-        # the rendered image, as the primary window
-        with dpg.window(
-            tag="_primary_window",
-            width=self.W,
-            height=self.H,
-            pos=[0, 0],
-            no_move=True,
-            no_title_bar=True,
-            no_scrollbar=True,
-        ):
-            # add the texture
-            dpg.add_image("_texture")
-
-        # dpg.set_primary_window("_primary_window", True)
-
-        # control window
-        with dpg.window(
-            label="Control",
-            tag="_control_window",
-            width=600,
-            height=self.H,
-            pos=[self.W, 0],
-            no_move=True,
-            no_title_bar=True,
-        ):
-            # button theme
-            with dpg.theme() as theme_button:
-                with dpg.theme_component(dpg.mvButton):
-                    dpg.add_theme_color(dpg.mvThemeCol_Button, (23, 3, 18))
-                    dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (51, 3, 47))
-                    dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (83, 18, 83))
-                    dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 5)
-                    dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 3, 3)
-
-            # timer stuff
-            with dpg.group(horizontal=True):
-                dpg.add_text("Infer time: ")
-                dpg.add_text("no data", tag="_log_infer_time")
-
-            def callback_setattr(sender, app_data, user_data):
-                setattr(self, user_data, app_data)
-
-            # init stuff
-            with dpg.collapsing_header(label="Initialize", default_open=True):
-
-                # seed stuff
-                def callback_set_seed(sender, app_data):
-                    self.seed = app_data
-                    self.seed_everything()
-
-                dpg.add_input_text(
-                    label="seed",
-                    default_value=self.seed,
-                    on_enter=True,
-                    callback=callback_set_seed,
-                )
-
-                # input stuff
-                def callback_select_input(sender, app_data):
-                    # only one item
-                    for k, v in app_data["selections"].items():
-                        dpg.set_value("_log_input", k)
-                        self.load_input(v)
-
-                    self.need_update = True
-
-                with dpg.file_dialog(
-                    directory_selector=False,
-                    show=False,
-                    callback=callback_select_input,
-                    file_count=1,
-                    tag="file_dialog_tag",
-                    width=700,
-                    height=400,
-                ):
-                    dpg.add_file_extension("Images{.jpg,.jpeg,.png}")
-
-                with dpg.group(horizontal=True):
-                    dpg.add_button(
-                        label="input",
-                        callback=lambda: dpg.show_item("file_dialog_tag"),
-                    )
-                    dpg.add_text("", tag="_log_input")
-
-                # overlay stuff
-                with dpg.group(horizontal=True):
-
-                    def callback_toggle_overlay_input_img(sender, app_data):
-                        self.overlay_input_img = not self.overlay_input_img
-                        self.need_update = True
-
-                    dpg.add_checkbox(
-                        label="overlay image",
-                        default_value=self.overlay_input_img,
-                        callback=callback_toggle_overlay_input_img,
-                    )
-
-                    def callback_set_overlay_input_img_ratio(sender, app_data):
-                        self.overlay_input_img_ratio = app_data
-                        self.need_update = True
-
-                    dpg.add_slider_float(
-                        label="ratio",
-                        min_value=0,
-                        max_value=1,
-                        format="%.1f",
-                        default_value=self.overlay_input_img_ratio,
-                        callback=callback_set_overlay_input_img_ratio,
-                    )
-
-                # prompt stuff
-
-                dpg.add_input_text(
-                    label="prompt",
-                    default_value=self.prompt,
-                    callback=callback_setattr,
-                    user_data="prompt",
-                )
-
-                dpg.add_input_text(
-                    label="negative",
-                    default_value=self.negative_prompt,
-                    callback=callback_setattr,
-                    user_data="negative_prompt",
-                )
-
-                # save current model
-                with dpg.group(horizontal=True):
-                    dpg.add_text("Save: ")
-
-                    def callback_save(sender, app_data, user_data):
-                        self.save_model(mode=user_data)
-
-                    dpg.add_button(
-                        label="model",
-                        tag="_button_save_model",
-                        callback=callback_save,
-                        user_data="model",
-                    )
-                    dpg.bind_item_theme("_button_save_model", theme_button)
-
-                    dpg.add_button(
-                        label="geo",
-                        tag="_button_save_mesh",
-                        callback=callback_save,
-                        user_data="geo",
-                    )
-                    dpg.bind_item_theme("_button_save_mesh", theme_button)
-
-                    dpg.add_button(
-                        label="geo+tex",
-                        tag="_button_save_mesh_with_tex",
-                        callback=callback_save,
-                        user_data="geo+tex",
-                    )
-                    dpg.bind_item_theme("_button_save_mesh_with_tex", theme_button)
-
-                    dpg.add_input_text(
-                        label="",
-                        default_value=self.opt.save_path,
-                        callback=callback_setattr,
-                        user_data="save_path",
-                    )
-
-            # training stuff
-            with dpg.collapsing_header(label="Train", default_open=True):
-                # lr and train button
-                with dpg.group(horizontal=True):
-                    dpg.add_text("Train: ")
-
-                    def callback_train(sender, app_data):
-                        if self.training:
-                            self.training = False
-                            dpg.configure_item("_button_train", label="start")
-                        else:
-                            self.prepare_train()
-                            self.training = True
-                            dpg.configure_item("_button_train", label="stop")
-
-                    # dpg.add_button(
-                    #     label="init", tag="_button_init", callback=self.prepare_train
-                    # )
-                    # dpg.bind_item_theme("_button_init", theme_button)
-
-                    dpg.add_button(
-                        label="start", tag="_button_train", callback=callback_train
-                    )
-                    dpg.bind_item_theme("_button_train", theme_button)
-
-                with dpg.group(horizontal=True):
-                    dpg.add_text("", tag="_log_train_time")
-                    dpg.add_text("", tag="_log_train_log")
-
-            # rendering options
-            with dpg.collapsing_header(label="Rendering", default_open=True):
-                # mode combo
-                def callback_change_mode(sender, app_data):
-                    self.mode = app_data
-                    self.need_update = True
-
-                dpg.add_combo(
-                    ("image", "depth", "alpha"),
-                    label="mode",
-                    default_value=self.mode,
-                    callback=callback_change_mode,
-                )
-
-                # fov slider
-                def callback_set_fovy(sender, app_data):
-                    self.cam.fovy = np.deg2rad(app_data)
-                    self.need_update = True
-
-                dpg.add_slider_int(
-                    label="FoV (vertical)",
-                    min_value=1,
-                    max_value=120,
-                    format="%d deg",
-                    default_value=np.rad2deg(self.cam.fovy),
-                    callback=callback_set_fovy,
-                )
-
-                def callback_set_gaussain_scale(sender, app_data):
-                    self.gaussain_scale_factor = app_data
-                    self.need_update = True
-
-                dpg.add_slider_float(
-                    label="gaussain scale",
-                    min_value=0,
-                    max_value=1,
-                    format="%.2f",
-                    default_value=self.gaussain_scale_factor,
-                    callback=callback_set_gaussain_scale,
-                )
-
-        ### register camera handler
-
-        def callback_camera_drag_rotate_or_draw_mask(sender, app_data):
-            if not dpg.is_item_focused("_primary_window"):
-                return
-
-            dx = app_data[1]
-            dy = app_data[2]
-
-            self.cam.orbit(dx, dy)
-            self.need_update = True
-
-        def callback_camera_wheel_scale(sender, app_data):
-            if not dpg.is_item_focused("_primary_window"):
-                return
-
-            delta = app_data
-
-            self.cam.scale(delta)
-            self.need_update = True
-
-        def callback_camera_drag_pan(sender, app_data):
-            if not dpg.is_item_focused("_primary_window"):
-                return
-
-            dx = app_data[1]
-            dy = app_data[2]
-
-            self.cam.pan(dx, dy)
-            self.need_update = True
-
-        def callback_set_mouse_loc(sender, app_data):
-            if not dpg.is_item_focused("_primary_window"):
-                return
-
-            # just the pixel coordinate in image
-            self.mouse_loc = np.array(app_data)
-
-        with dpg.handler_registry():
-            # for camera moving
-            dpg.add_mouse_drag_handler(
-                button=dpg.mvMouseButton_Left,
-                callback=callback_camera_drag_rotate_or_draw_mask,
-            )
-            dpg.add_mouse_wheel_handler(callback=callback_camera_wheel_scale)
-            dpg.add_mouse_drag_handler(
-                button=dpg.mvMouseButton_Middle, callback=callback_camera_drag_pan
-            )
-
-        dpg.create_viewport(
-            title="Gaussian3D",
-            width=self.W + 600,
-            height=self.H + (45 if os.name == "nt" else 0),
-            resizable=False,
-        )
-
-        ### global theme
-        with dpg.theme() as theme_no_padding:
-            with dpg.theme_component(dpg.mvAll):
-                # set all padding to 0 to avoid scroll bar
-                dpg.add_theme_style(
-                    dpg.mvStyleVar_WindowPadding, 0, 0, category=dpg.mvThemeCat_Core
-                )
-                dpg.add_theme_style(
-                    dpg.mvStyleVar_FramePadding, 0, 0, category=dpg.mvThemeCat_Core
-                )
-                dpg.add_theme_style(
-                    dpg.mvStyleVar_CellPadding, 0, 0, category=dpg.mvThemeCat_Core
-                )
-
-        dpg.bind_item_theme("_primary_window", theme_no_padding)
-
-        dpg.setup_dearpygui()
-
-        ### register a larger font
-        # get it from: https://github.com/lxgw/LxgwWenKai/releases/download/v1.300/LXGWWenKai-Regular.ttf
-        if os.path.exists("LXGWWenKai-Regular.ttf"):
-            with dpg.font_registry():
-                with dpg.font("LXGWWenKai-Regular.ttf", 18) as default_font:
-                    dpg.bind_font(default_font)
-
-        # dpg.show_metrics()
-
-        dpg.show_viewport()
-
-    def render(self):
-        assert self.gui
-        while dpg.is_dearpygui_running():
-            # update texture every frame
-            if self.training:
-                self.train_step()
-            self.test_step()
-            dpg.render_dearpygui_frame()
-
-    # no gui mode
     def train(self, iters=500):
         if iters > 0:
             self.prepare_train()
@@ -1031,13 +547,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True, help="path to the yaml config file")
     args, extras = parser.parse_known_args()
-
-    # override default config from cli
     opt = OmegaConf.merge(OmegaConf.load(args.config), OmegaConf.from_cli(extras))
 
     gui = Gene3dContent(opt)
-
-    if opt.gui:
-        gui.render()
-    else:
-        gui.train(opt.iters)
+    gui.train(opt.iters)

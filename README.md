@@ -19,6 +19,8 @@ git clone https://github.com/secondxworld/3d_pipeline.git --recursive
 本地
 python main.py --config configs/text.yaml prompt="a photo of an icecream" save_path=icecream
 
+kire logs/icecream_mesh.obj --save logs --wogui
+
 
 
 code from [dreamgaussian](https://github.com/dreamgaussian/dreamgaussian.git) 

@@ -2,7 +2,6 @@ from diffusers import (
     DDIMScheduler,
     StableDiffusionPipeline,
 )
-from diffusers.utils.import_utils import is_xformers_available
 
 
 import numpy as np
@@ -232,6 +231,8 @@ class StableDiffusion(nn.Module):
             # expand the latents if we are doing classifier-free guidance to avoid doing two forward passes.
             latent_model_input = torch.cat([latents] * 2)
             # predict the noise residual
+            embeddings=embeddings.half()
+            latent_model_input=latent_model_input.half()
             noise_pred = self.unet(
                 latent_model_input, t, encoder_hidden_states=embeddings
             ).sample
@@ -249,7 +250,6 @@ class StableDiffusion(nn.Module):
 
     def decode_latents(self, latents):
         latents = 1 / self.vae.config.scaling_factor * latents
-
         imgs = self.vae.decode(latents).sample
         imgs = (imgs / 2 + 0.5).clamp(0, 1)
 
@@ -293,6 +293,7 @@ class StableDiffusion(nn.Module):
         )  # [1, 4, 64, 64]
 
         # Img latents -> imgs
+        latents=latents.half()
         imgs = self.decode_latents(latents)  # [1, 3, 512, 512]
 
         # Img to Numpy
@@ -342,4 +343,5 @@ if __name__ == "__main__":
 
     # visualize image
     plt.imshow(imgs[0])
-    plt.show()
+    # plt.show()
+    plt.savefig("img.jpg", dpi=300, bbox_inches='tight', format='jpg', transparent=True)

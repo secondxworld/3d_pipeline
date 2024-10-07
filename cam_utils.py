@@ -56,6 +56,8 @@ def orbit_camera(elevation, azimuth, radius=1, is_degree=True, target=None, open
     if target is None:
         target = np.zeros([3], dtype=np.float32)
     campos = np.array([x, y, z]) + target  # [3]
+    print("campos:")
+    print(campos)
     T = np.eye(4, dtype=np.float32)
     T[:3, :3] = look_at(campos, target, opengl)
     T[:3, 3] = campos
@@ -144,3 +146,23 @@ class OrbitCamera:
     def pan(self, dx, dy, dz=0):
         # pan in camera coordinate system (careful on the sensitivity!)
         self.center += 0.0005 * self.rot.as_matrix()[:3, :3] @ np.array([-dx, -dy, dz])
+
+if __name__ == "__main__":
+        campos = np.array([[0, 0, 2], [1, 1, 1]], dtype=np.float32)
+        target = np.array([[0, 0, 0], [1, 0, 0]], dtype=np.float32)
+        rotation_matrix = look_at(campos, target, opengl=True)
+        print("rotation_matrix: ")
+        print(rotation_matrix.shape)
+        
+        elevation = 30  
+        azimuth = 45    
+        radius = 2
+        target = np.array([0, 0, 0], dtype=np.float32)
+        camera_pose = orbit_camera(elevation, azimuth, radius, is_degree=True, target=target)
+        print("camera_pose: ")
+        print(camera_pose)
+        
+        camera = OrbitCamera(W=800, H=600)
+        mvp_matrix = camera.mvp
+        print("mvp_matrix: ")
+        print(mvp_matrix)
