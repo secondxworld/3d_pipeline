@@ -47,7 +47,7 @@ class StableDiffusion(nn.Module):
                 f"Stable-diffusion version {self.sd_version} not supported."
             )
         model_key="./models/sd21"
-        self.dtype = torch.float16 if fp16 else torch.float32
+        self.dtype = torch.float16
 
         # Create model
         pipe = StableDiffusionPipeline.from_pretrained(model_key) #model_key, torch_dtype=self.dtype
@@ -60,11 +60,11 @@ class StableDiffusion(nn.Module):
             # pipe.enable_model_cpu_offload()
         else:
             pipe.to(device)
-
-        self.vae = pipe.vae
+            
+        self.vae = pipe.vae.half()
         self.tokenizer = pipe.tokenizer
         self.text_encoder = pipe.text_encoder
-        self.unet = pipe.unet
+        self.unet = pipe.unet.half()
 
         self.scheduler = DDIMScheduler.from_pretrained(
             model_key, subfolder="scheduler", torch_dtype=self.dtype
@@ -182,7 +182,7 @@ class StableDiffusion(nn.Module):
                     else: return 'back'
 
                 embeddings = torch.cat([self.embeddings[_get_dir_ind(h)] for h in hors] + [self.embeddings['neg'].expand(batch_size, -1, -1)])
-
+            embeddings=embeddings.half()
             noise_pred = self.unet(
                 latent_model_input, tt, encoder_hidden_states=embeddings
             ).sample
@@ -259,7 +259,6 @@ class StableDiffusion(nn.Module):
         # imgs: [B, 3, H, W]
 
         imgs = 2 * imgs - 1
-
         posterior = self.vae.encode(imgs).latent_dist
         latents = posterior.sample() * self.vae.config.scaling_factor
 

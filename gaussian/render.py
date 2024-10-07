@@ -1000,16 +1000,6 @@ class Renderer:
             colors_precomp = override_color
 
         # Rasterize visible Gaussians to image, obtain their radii (on screen).
-        print(rasterizer(
-            means3D=means3D,
-            means2D=means2D,
-            shs=shs,
-            colors_precomp=colors_precomp,
-            opacities=opacity,
-            scales=scales,
-            rotations=rotations,
-            cov3D_precomp=cov3D_precomp,
-        ))
         rendered_image, radii, rendered_depth, rendered_alpha = rasterizer(
             means3D=means3D,
             means2D=means2D,

@@ -62,7 +62,7 @@ W: 800
 
 ### Gaussian splatting
 num_pts: 5000
-sh_degree: 0
+sh_degree: 3
 position_lr_init: 0.001
 position_lr_final: 0.00002
 position_lr_delay_mult: 0.02
